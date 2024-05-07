@@ -8,13 +8,19 @@ from pprint import pprint
 from collections import Counter
 import sqlite3
 
-#TODO make everything UTC, no need to import timezone even
-
 # Main API reference:
 # https://api2.sota.org.uk/docs/index.html
 
 # Set locale for parsing numbers
 locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
+
+#TODO
+# Add query period (-2 hours) and query frequency (1 hour) to config
+# Make association adjustable
+# Log association stats to separate table (store all then has more meaning)
+# All other stats to a specific table, too
+# Output as HTML to specific path
+
 
 config = {
     "server" : "https://api2.sota.org.uk",
