@@ -363,13 +363,16 @@ def monthly_report_summits(year_number, month_number):
 
     f = open(config["report_file"], "a")
     output(f, "\n====================================================================\n")
-    output(f, "Ref\tName\tCount\tTotal\tPoints\tMost Recently\tBy")
+    output(f, "Ref         Name                      Ct. Tot.  Pts. Most Recently By\n")
     
     suppress_stale_data_warnings = False
     
     # For every summit in this list, query for the activation history of the summit, ordered by refresh date.
     # We only need to pull the two most recent records.
     # NOTE: ensure that the list of summits is refreshed just prior to running this report.
+    
+    saw_initial = False
+    saw_rare = False
     
     for summit in hot_summits:
         query = "SELECT * FROM `summits` WHERE `summitCode` == '{}' ORDER BY `refreshed` DESC LIMIT 2".format(summit[0])
@@ -410,17 +413,24 @@ def monthly_report_summits(year_number, month_number):
         if ' ' in most_recently:
             date, time = most_recently.split(' ')
             most_recently = date
-        output(f, "{:12}{:24}  {:<2}  {:<4}  {:<2}   {} {}\n".format(ref, name, count, total, points, most_recently, by))
-        
-    f.close()    
-    
+        if total <= 1:
+            badge = "★"
+            saw_initial = True
+        elif total <= 5:
+            badge = "☆"
+            saw_rare = True
+        else:
+            badge = " "
+        output(f, "{:12}{:24}  {:<2}  {:<4}  {:<2}   {} {} {}\n".format(ref, name, count, total, points, most_recently, by, badge))
+    if saw_initial:
+        output(f, "★: Initial activation. Congratulations!\n")
+    if saw_rare:
+        output(f, "☆: Rare summit, five or fewer activations\n")
+    f.close()
+
 def main():
     global conn
     initdb()
-    
-    monthly_report_summits(2024, 5)
-    return
-
         
     previous = None
     while True:
