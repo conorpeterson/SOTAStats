@@ -16,24 +16,37 @@ locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
 
 #TODO
 # Add query period (-2 hours) and query frequency (1 hour) to config
-# Make association adjustable
 # Log association stats to separate table (store all then has more meaning)
 # All other stats to a specific table, too
 # Output as HTML to specific path
-
+# Normalize incoming spots immediately, just like summits
+# Adjustable report intervals - why must summits be reported every month? Why not each week, or day for busy associations?
 
 config = {
     "server" : "https://api2.sota.org.uk",
+    "association" : "w5n",
     "dbname" : "sotastats.db",
     "stats"    : "querystats.csv",
     "spots_table" : "spots",
+    "summits_table" : "summits",
     "store_all" : True,
     "report_file" : "w5n_spot_summary.txt",
 }
 
 conn = None # sqlite3 connection
 
-def query():
+def initdb():
+    global conn, config
+    queries = [
+        "CREATE TABLE IF NOT EXISTS `{}` (`id` INTEGER PRIMARY KEY, `timeStamp` TEXT, `activatorCallsign` TEXT, `associationCode` TEXT, `summitCode` TEXT, `frequency` STRING, `mode` TEXT, `summitDetails` TEXT, `comments` TEXT, `highlightColor` TEXT, `callsign` TEXT, `activatorName` TEXT, `userID` INTEGER)".format(config["spots_table"]),
+        "CREATE TABLE IF NOT EXISTS `{}` (`summitCode` TEXT, `name` TEXT, `points` INTEGER, `activationCount` INTEGER, `activationDate` TEXT, `activationCall` TEXT, `refreshed` TEXT)".format(config["summits_table"])
+    ]
+    
+    conn = sqlite3.connect(config["dbname"])
+    for q in queries:
+        conn.execute(q)
+
+def query_spots():
     req_str = f"{config['server']}/api/spots/{-2}/all"
     
     now = datetime.now()
@@ -52,16 +65,57 @@ def query():
         
     return response
 
-def initdb():
-    global conn, config
-    
-    create_table_query = "CREATE TABLE IF NOT EXISTS `{}` (`id` INTEGER PRIMARY KEY, `timeStamp` TEXT, `activatorCallsign` TEXT, `associationCode` TEXT, `summitCode` TEXT, `frequency` STRING, `mode` TEXT, `summitDetails` TEXT, `comments` TEXT, `highlightColor` TEXT, `callsign` TEXT, `activatorName` TEXT, `userID` INTEGER)".format(config["spots_table"])
-    
-    conn = sqlite3.connect(config["dbname"])
-    conn.execute(create_table_query)
+def query_summits():
+    # Summit data is retrieved by region code, so first query the association to learn its regions
+    assoc_query = f"{config['server']}/api/associations/{config['association']}"
 
+    now = datetime.now()
+    print(f"{now} refreshing summits\t", end="")
 
-# Examine and normalize a json spot from the response.
+    try:
+        response = requests.get(assoc_query).json()
+    except Exception as e:
+        print(f"Exception in request for association {config['association']}: {e}")
+        return None
+    
+    region_list = [entry["regionCode"] for entry in response["regions"]]
+    
+    # All summits are given the exact same timestamp to simplify batching
+    batch_timestamp = datetime.utcnow()
+    
+    summits = []
+    for r in region_list:
+        print(f"{r} ", end="")
+        summit_query = f"{config['server']}/api/regions/{config['association']}/{r}"
+        try:
+            response = requests.get(summit_query).json()
+        except Exception as e:
+            print(f"Exception in summit request for region {r}: {e}")
+        for s in response["summits"]:
+            summits.append(normalize_summit(s, batch_timestamp))
+    print(f"\n\tRead {len(summits)} summits")
+    return summits
+
+# Examine and normalize a json summit from the api.
+# 's' is a dict containing all of the summit fields as returned by the server.
+# timestamp is a datetime object representing a batch date to apply
+# Returns a new dict with normalized data or throws an exception
+def normalize_summit(s, timestamp):
+    n = dict()
+    n["summitCode"] = s["summitCode"].upper().strip()
+    n["name"] = s["name"].strip()
+    n["points"] = int(s["points"])
+    n["activationCount"] = int(s["activationCount"])
+    if n["activationCount"] == 0:
+        n["activationDate"] = None
+        n["activationCall"] = None
+    else:
+        n["activationDate"] = normalize_sota_timestamp(s["activationDate"])
+        n["activationCall"] = s["activationCall"].upper().strip()
+    n["refreshed"] = timestamp
+    return n
+
+# Examine and normalize a json spot from the api.
 # 's' is a dict containing all the spot fields
 # Returns a new dict containing normalized data or throws an exception
 def normalize_spot(s):
@@ -70,13 +124,7 @@ def normalize_spot(s):
     # id has to be an integer
     n["id"] = int(s["id"])
     
-    # Timestamp - SOTA API drops the zero off of milliseconds, which causes fromisoformat to choke.
-    # Workaround by dropping milliseconds altogether
-    if "." in s["timeStamp"]:
-        ts,ms = s["timeStamp"].split(".")
-        n["timeStamp"] = datetime.fromisoformat(ts)
-    else:
-        n["timeStamp"] = datetime.fromisoformat(s["timeStamp"])
+    n["timeStamp"] = normalize_sota_timestamp(s["timeStamp"])
 
     # Text fields - clean up whitespace, ensure upper case where appropriate
     n["activatorCallsign"] = s["activatorCallsign"].upper().strip()
@@ -102,7 +150,18 @@ def normalize_spot(s):
     
     return n
 
-def store(spots):
+# The SOTA API drops trailing zeros from milliseconds which causes fromisoformat to choke.
+# This is a little workaround that just drops the milliseconds completely (for now)
+# timestamp is the exact string as returned from the API server.
+# returns a datetime object
+def normalize_sota_timestamp(timestamp):
+    if "." in timestamp:
+        ts,ms = timestamp.split(".")
+        return datetime.fromisoformat(ts)
+    else:
+        return datetime.fromisoformat(timestamp)
+    
+def store_spots(spots):
     global config
     
     store_cmd = "REPLACE INTO `{}` VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)".format(config["spots_table"])
@@ -115,7 +174,7 @@ def store(spots):
             pprint(s)
             print(f"Reason given: {e}")
             continue        
-        if n["associationCode"].upper() != "W5N" and not config["store_all"]:
+        if n["associationCode"].upper() != config["association"].upper() and not config["store_all"]:
             print("Skipping association code {}".format(n["associationCode"]))
             continue
         try:
@@ -129,14 +188,19 @@ def store(spots):
             pprint(s)
             print(f"Reason given: {e}")
 
-# select * from spots where timestamp <= '2024-02-26T03:30:00';
-# month and year are integers
-#def report_monthly(month, year):
-#    begin_timestamp = f"{year}-{month:02}-01T00:00:00"
-#    end_timestamp = "{year}-{month+1:02}-01T00:00:00"
-#    query = "SELECT * from `spots` WHERE `timestamp` >= '{}' AND `timestamp` < '{}'".format(begin_timestamp, end_timestamp)
-#    resultset = conn.execute(query)
-
+# store_summit expects the summit data to be normalized already, unlike store_spots
+def store_summits(summits):
+    global config
+    store_cmd = "REPLACE INTO `{}` VALUES (?, ?, ?, ?, ?, ?, ?)".format(config["summits_table"])
+    
+    for s in summits:
+        try:
+            conn.execute(store_cmd, (s["summitCode"], s["name"], s["points"], s["activationCount"], s["activationDate"], s["activationCall"], s["refreshed"]))
+        except Exception as e:
+            print("Warning: could not store summit:")
+            pprint(s)
+            print(f"Reason given: {e}")
+            
 # daily_report queries the database for individual activations of that day.
 # "ending on" is a timestamp reflecting the end period, with local timezone attached
 # (for a day, the day ending on the supplied period)
@@ -148,7 +212,7 @@ def daily_report(ending_on):
     begin_timestamp = datetime(year=ending_on.year, month=ending_on.month, day=ending_on.day,
                                hour=0, minute=0, second=0)
         
-    query = "SELECT date(timeStamp), activatorCallsign, summitCode FROM `{}` WHERE `associationCode` == 'W5N' AND `timeStamp` >= '{}' AND `timeStamp` <= '{}'".format(config["spots_table"], begin_timestamp, end_timestamp)
+    query = "SELECT date(timeStamp), activatorCallsign, summitCode FROM `{}` WHERE `associationCode` == '{}' AND `timeStamp` >= '{}' AND `timeStamp` <= '{}'".format(config["spots_table"], config["association"].upper(), begin_timestamp, end_timestamp)
 
     try:
         result = list(conn.execute(query))
@@ -158,7 +222,8 @@ def daily_report(ending_on):
     
     with open(config["report_file"], "a") as f:
         f.write("\n--------------------------------------------------------------------\n")        
-        msg = "Daily summary of SOTA spots for W5N from {} to {} UTC\n".format(
+        msg = "Daily summary of SOTA spots for {} from {} to {} UTC\n".format(
+        config["association"].upper(),
         begin_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
         end_timestamp.strftime("%Y-%m-%d %H:%M:%S"))
         print(msg, end="")
@@ -177,13 +242,13 @@ def daily_report(ending_on):
         print(msg, end="")
         f.write(msg)
 
-def monthly_report(year_number, month_number):
+def monthly_report_spots(year_number, month_number):
     begin_timestamp = datetime(year=year_number, month=month_number, day=1, hour=0, minute=0, second=0)
     if month_number == 12:
         end_timestamp = datetime(year=year_number+1, month=1, day=1, hour=0, minute=0, second=0)
     else:
         end_timestamp = datetime(year=year_number, month=month_number+1, day=1, hour=0, minute=0, second=0)
-    query = "SELECT date(timeStamp), activatorCallsign, summitCode FROM `{}` WHERE `associationCode` == 'W5N' AND `timeStamp` >= '{}' AND `timeStamp` < '{}'".format(config["spots_table"], begin_timestamp, end_timestamp)
+    query = "SELECT date(timeStamp), activatorCallsign, summitCode FROM `{}` WHERE `associationCode` == '{}' AND `timeStamp` >= '{}' AND `timeStamp` < '{}'".format(config["spots_table"], config["association"].upper(), begin_timestamp, end_timestamp)
 
     try:
         result = list(conn.execute(query))
@@ -193,7 +258,8 @@ def monthly_report(year_number, month_number):
     
     with open(config["report_file"], "a") as f:
         f.write("\n====================================================================\n")
-        msg = "Monthly summary of SOTA spots for W5N from {} to {} UTC\n".format(
+        msg = "Monthly summary of SOTA spots for {} from {} to {} UTC\n".format(
+        config["association"].upper(),
         begin_timestamp.strftime("%Y-%m-%d"),
         end_timestamp.strftime("%Y-%m-%d"))
         print(msg, end="")
@@ -212,24 +278,166 @@ def monthly_report(year_number, month_number):
         msg = "Report generated {}\n".format(datetime.utcnow().strftime("%Y-%m-%d %H:%M"))
         print(msg, end="")
         f.write(msg)
+
+# Tees output to both screen and an open file, f
+def output(f, msg):
+    f.write(msg)
+    print(msg, end="")
+
+"""
+EXAMPLE FORMAT
+Date        Summit      Activator  Points  Summit Name
+2024-05-02  W5N/SI-003  A5DA       10      Vallecito Mountain★
+2024-05-02  W5N/SE-002  WB5USB/P   4       South Sandia Crest☆
+
+★: Initial Activation - Congratulations!
+☆: Rare summit (total activations < 5)
+
+Only the most recent activator and date are listed.
+"""
+
+"""
+Summit      Count  Points  Last Activated  By        Summit Name
+W5N/SI-003  2      10      2024-05-02      AD5A      Vallecito Mountain★
+W5N/SE-002  11     8       2024-05-04      WB5USB/P  South Sandia Crest☆
+W5N/SI-001  284    10      2024-05-07      N1CLC     Sandia Crest
+
+★: Initial Activation - Congratulations!
+☆: Rare summit - activation count under 5
+
+Count reflects the number of activations during the report period.
+If a summit was activated more than once during the reporting period, only
+the most recent activator is shown.
+Problem: then what about if two people activate a peak during a month? would it be flagged as the initial activation?
+"""
+
+"""
+New format - requires field widths to be calculated before printing.
+Main problem: initial activators may be misattributed, if a month goes by
+
+Summit       Name                  Count Total Points  Most Recently  By
+W5N/SI-003   Sandia Crest          2     138   10      2024-05-02     AD5A
+W5N/SE-002☆  South Sandia Crest   11    27    8       2024-05-04     WB5USB/P
+W5N/SI-001★  Vallecito Mountain   1     1     10      2024-05-04     N1CLC
+
+*: Initial Activation - congratulations!
+†: Rare summit, less than 5 activations total
+
+Count is the number of activations during the reporting period.
+Only the most recent activator is shown.
+"""
+
+# monthly_summit_report: this report depends on the summit list being refreshed exactly once
+# per month, just prior to running each report, so that the activation count can be compared.
+def monthly_report_summits(year_number, month_number):
+    # Get a list of all summits activated for the month in question
+    begin_timestamp = datetime(year=year_number, month=month_number, day=1, hour=0, minute=0, second=0)
+    if month_number == 12:
+        end_timestamp = datetime(year=year_number+1, month=1, day=1, hour=0, minute=0, second=0)
+    else:
+        end_timestamp = datetime(year=year_number, month=month_number+1, day=1, hour=0, minute=0, second=0)
+
+    query = f"SELECT * FROM `summits` WHERE `activationDate` >= '{begin_timestamp}' and `activationDate` < '{end_timestamp}' ORDER BY `summitCode`, `refreshed`, `activationDate` ASC" 
+    try:
+        hot_summits = list(conn.execute(query))
+    except Exception as e:
+        print(f"Warning: unable to retrieve results. Reason given: {e}")
+        return
+
+    print("Hot summits list:")
+    for s in hot_summits:
+        print(s)
+    # Deduplicate - this query won't always run exactly one month apart
+    deduplicated = []
+    for s in hot_summits:
+        found = False
+        for j in hot_summits:
+            if j[0] == s[0]:
+                found = True
+                break
+        if not found:
+            deduplicated.append(s)
+                
     
+    print(f"The following summits were activated during the period between {begin_timestamp} and {end_timestamp}:")
+
+    f = open(config["report_file"], "a")
+    output(f, "\n====================================================================\n")
+    output(f, "Ref\tName\tCount\tTotal\tPoints\tMost Recently\tBy")
+    
+    suppress_stale_data_warnings = False
+    
+    # For every summit in this list, query for the activation history of the summit, ordered by refresh date.
+    # We only need to pull the two most recent records.
+    # NOTE: ensure that the list of summits is refreshed just prior to running this report.
+    
+    for summit in hot_summits:
+        query = "SELECT * FROM `summits` WHERE `summitCode` == '{}' ORDER BY `refreshed` DESC LIMIT 2".format(summit[0])
+        summit_history = list(conn.execute(query))
+        
+        # Basic sanity checks
+        if len(summit_history) != 2:
+            output(f, "Error: not enough data for summit {}\n".format(summit[0]))
+            continue
+        
+        # Possible that the data is not really a month old - throw a warning if so
+        # ...but only the first time.
+        if not suppress_stale_data_warnings:
+            most_recent_refresh = datetime.fromisoformat(summit_history[0][6])
+            previous_refresh = datetime.fromisoformat(summit_history[1][6])
+            td = (most_recent_refresh - previous_refresh).days
+            if td < 29: # I mean, that's about a month right?
+                output(f, f"Warning: data less than a month old (td={td} days)\n")
+            elif td > 31:
+                output(f, f"Warning: data older than one month (td={td} days)\n")
+            suppress_stale_data_warnings = True
+
+        # Compare the activation counts of the first two entries in the list and print report
+        #print("{}  {:<32}, {:<2} points, activated {} times, most recently by {}".format(
+        #    summit[0], summit[1], summit[2],
+        #    summit[3] - summit_history[1][3],
+        #    summit[5]))
+        
+        # Summit, Name, Count, Total, Points, Most Recently, By
+        ref = summit[0]
+        name = summit[1]
+        count = summit[3] - summit_history[1][3]
+        total = summit[3]
+        points = summit[2]
+        most_recently = summit[4]
+        by = summit[5]
+        
+        if ' ' in most_recently:
+            date, time = most_recently.split(' ')
+            most_recently = date
+        output(f, "{:12}{:24}  {:<2}  {:<4}  {:<2}   {} {}\n".format(ref, name, count, total, points, most_recently, by))
+        
+    f.close()    
     
 def main():
     global conn
     initdb()
     
+    monthly_report_summits(2024, 5)
+    return
+
+        
     previous = None
     while True:
         now = datetime.utcnow()
         if previous == None or now.hour != previous.hour:
-            data = query()
-            if data is not None:
-                store(data)
+            spot_data = query_spots()
+            if spot_data is not None:
+                store_spots(spot_data)
                 conn.commit()
         if previous != None and now.day != previous.day:
             daily_report(previous)
         if previous != None and now.month != previous.month:
-            monthly_report(previous.year, previous.month)
+            monthly_report_spots(previous.year, previous.month)
+            summit_data = query_summits()
+            store_summits(summit_data)
+            conn.commit()
+            monthly_report_summits(previous.year, previous.month)
         previous = now
         time.sleep(1)
     conn.close()
