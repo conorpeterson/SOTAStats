@@ -1,3 +1,32 @@
+# SOTAStats - a script to gather and report SOTA data specific to your association.
+#
+# By Conor Peterson, N5XR (n5xr@replyhazy.net), 2024
+# License: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0)
+# 
+# This script uses the public SOTA API (https://api2.sota.org.uk/docs/index.html) to
+# monitor spots for your association, and perform deltas of your association's summits
+# at regular intervals to see who has activated what.
+#
+# SOTA spots are refreshed each hour and stored to a local sqlite database.
+# Once per month this data is summarized for your association code.
+#
+# Additionally, each month, the most recent activation data for every summit in the
+# association is queried, saved, and compared to last month. All differences are
+# then summarized.
+#
+# Reports are in plain text format.
+#
+# This script is intended to be run 24/7 on an unattended computer, i.e. server at home
+# or in the cloud. You could run it on your desktop PC or even a raspberry pi if it's
+# online 24/7.
+#
+# I developed this script for W5N (New Mexico, USA) so that our community could reach
+# out to new activators, and to highlight initial and rare activations when they happen.
+# Personally, I copy the monthly reports into an email to my association's reflector and
+# write some color commentary. I never expected to release this code so please excuse
+# its fragility. I just scraped it off my "workbench" directly into github.
+# -- CN (N5XR) / Santa Fe, NM
+
 import sys
 import time
 from datetime import datetime, timedelta
@@ -283,49 +312,6 @@ def monthly_report_spots(year_number, month_number):
 def output(f, msg):
     f.write(msg)
     print(msg, end="")
-
-"""
-EXAMPLE FORMAT
-Date        Summit      Activator  Points  Summit Name
-2024-05-02  W5N/SI-003  A5DA       10      Vallecito Mountain★
-2024-05-02  W5N/SE-002  WB5USB/P   4       South Sandia Crest☆
-
-★: Initial Activation - Congratulations!
-☆: Rare summit (total activations < 5)
-
-Only the most recent activator and date are listed.
-"""
-
-"""
-Summit      Count  Points  Last Activated  By        Summit Name
-W5N/SI-003  2      10      2024-05-02      AD5A      Vallecito Mountain★
-W5N/SE-002  11     8       2024-05-04      WB5USB/P  South Sandia Crest☆
-W5N/SI-001  284    10      2024-05-07      N1CLC     Sandia Crest
-
-★: Initial Activation - Congratulations!
-☆: Rare summit - activation count under 5
-
-Count reflects the number of activations during the report period.
-If a summit was activated more than once during the reporting period, only
-the most recent activator is shown.
-Problem: then what about if two people activate a peak during a month? would it be flagged as the initial activation?
-"""
-
-"""
-New format - requires field widths to be calculated before printing.
-Main problem: initial activators may be misattributed, if a month goes by
-
-Summit       Name                  Count Total Points  Most Recently  By
-W5N/SI-003   Sandia Crest          2     138   10      2024-05-02     AD5A
-W5N/SE-002☆  South Sandia Crest   11    27    8       2024-05-04     WB5USB/P
-W5N/SI-001★  Vallecito Mountain   1     1     10      2024-05-04     N1CLC
-
-*: Initial Activation - congratulations!
-†: Rare summit, less than 5 activations total
-
-Count is the number of activations during the reporting period.
-Only the most recent activator is shown.
-"""
 
 # monthly_summit_report: this report depends on the summit list being refreshed exactly once
 # per month, just prior to running each report, so that the activation count can be compared.
